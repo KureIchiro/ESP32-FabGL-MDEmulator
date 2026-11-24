@@ -54,6 +54,8 @@ Like Gwenesis and FabGL, this sketch as a whole is distributed under the GPLv3 (
 
 - **Controller**: player 1 only, 4 buttons. The adapter on Serial1 sends one byte at a time as on the other machines (0 = pressed; bit 0–3 = up/down/left/right, bit 4–6 = buttons 1–3), but bit 7 is button 4 here (the other machines use bit 7 to tell player 1 from player 2), so the adapter must be in its 1-controller 4-button mode.
 - **F12**: pause / resume. **Shift + F12**: reset (restarts the ESP32 and goes back to the ROM list).
+- **F9 / F10 / F11**: load state slot 2 / 1 / 0. **Shift + F9 / F10 / F11**: save the state to that slot (`/MD/SAVE/<ROM name>_<slot>.sta` on the SD card). The sound restarts from the next note after a load.
+- Battery backup RAM (when the ROM header declares it, past the end of the ROM): saved automatically to `/MD/SAVE/<ROM name>.srm` 2 seconds after the game writes it, and loaded when the game starts. Not supported: the switched backup RAM of ROMs over 2 MB, and EEPROM saves.
 - **Shift + F8**: removes / restores the horizontal sprite limit (20 per line). Removing it reduces flicker in some games; heavy scenes may run slower.
 - **ROM list**: Up/Down = select, PageUp/PageDown = page, Enter = start / open the folder, BackSpace or ESC = folder up. With the controller: up/down = select, left/right = page (hold left/right briefly while up/down is not pressed), button 1 or 4 = Enter, button 2 = folder up. TAB (controller button 3) = machine to start next (only with EmuLauncher).
 - **Button layout**: each Enter on the top row of the ROM list (BUTTON 1 2 3 = …) switches buttons 1–3 (keyboard Z / X / C) between A B C and C B A. It is saved to `/MD/PAD.CFG` on the SD card. START does not change.
@@ -137,6 +139,8 @@ Gwenesis・FabGL と同じく、このスケッチ全体を GPLv3 で、ソー�
 
 - **コントローラ**: 1P 専用・4 ボタンです。Serial1 のアダプタからはほかの機種と同じく 1 バイトずつ届きます(0 = 押下。bit0〜3 = 上下左右、bit4〜6 = ボタン 1〜3)が、この機種では bit7 がボタン 4 です(ほかの機種は bit7 で 1P と 2P を分けています)。アダプタは 1 コン 4 ボタンのモードにしてください。
 - **F12**: 一時停止 / 再開。**Shift + F12**: リセット(ESP32 ごと再起動して ROM の一覧に戻る)。
+- **F9 / F10 / F11**: ステートのスロット 2 / 1 / 0 を読み込む。**Shift + F9 / F10 / F11**: そのスロットへ保存(SD カードの `/MD/SAVE/<ROM の名前>_<スロット>.sta`)。読み込んだあとの音は、次の音から鳴ります。
+- バッテリーバックアップ RAM(ROM のヘッダに書いてあり、ROM の後ろにあるもの): ゲームが書き換えてから 2 秒後に SD カードの `/MD/SAVE/<ROM の名前>.srm` へ自動で保存し、ゲームを始めるときに読みます。2MB を超える ROM の切り替え式のものと、EEPROM のセーブには対応していません。
 - **Shift + F8**: スプライトの横の枚数制限(1 ラインに 20 個)を外す / 戻す。ちらつきが減るゲームがあります。重い場面は遅くなることがあります。
 - **ROM の一覧**: ↑↓ = 選ぶ、PageUp / PageDown = ページ、Enter = 起動 / フォルダに入る、BackSpace か ESC = 上のフォルダ。コントローラは上下 = 選ぶ、左右 = ページ(上下を押していないときに左右を少し押し続ける)、ボタン1 か 4 = Enter、ボタン2 = 上のフォルダ。TAB(コントローラはボタン 3)= 次に起動する機種(EmuLauncher を使うときだけ)。
 - **ボタンの配置**: ROM の一覧のいちばん上の行(BUTTON 1 2 3 = …)で Enter を押すたびに、ボタン 1〜3(キーボードの Z / X / C)が A B C と C B A で入れ替わります。SD の `/MD/PAD.CFG` に保存されます。START は変わりません。

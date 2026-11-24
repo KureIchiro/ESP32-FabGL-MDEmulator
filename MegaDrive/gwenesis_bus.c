@@ -25,6 +25,10 @@ __license__ = "GPLv3"
 #include <string.h>
 #include <assert.h>
 #include <ctype.h>
+#include <stdlib.h>
+#ifdef ARDUINO
+#include <esp_heap_caps.h>
+#endif
 
 #include "m68k.h"
 
@@ -108,6 +112,62 @@ void load_cartridge()
 }
 #else
 
+/* 2026-11-24 (GPLv3 section 5a) MegaDrive for TTGO VGA32: the battery backed RAM of the cartridge, where the ROM
+ * header says ("RA" at 1B0h, the first and last address at 1B4h / 1B8h). Only past the end of the ROM (not the
+ * ROM / RAM switching of cartridges over 2 MB, not EEPROM: a range under 2 KB is taken as EEPROM and left out).
+ * The bytes are kept by address from the first even address, so a cartridge that uses the odd bytes only leaves
+ * every other byte unused. Up to 64 KB. Without it these addresses read FFh as before. The sketch loads and saves
+ * md_sram (MegaDrive.ino); md_sram_changes counts the writes that changed a byte. */
+unsigned char *md_sram;
+unsigned int md_sram_base, md_sram_size;
+volatile unsigned int md_sram_changes;
+
+static unsigned int md_rom_byte(unsigned int a)
+{
+#ifdef ROM_SWAP
+    return ROM_DATA[a ^ 1];
+#else
+    return ROM_DATA[a];
+#endif
+}
+static unsigned int md_rom_long(unsigned int a)
+{
+    return (md_rom_byte(a) << 24) | (md_rom_byte(a + 1) << 16) | (md_rom_byte(a + 2) << 8) | md_rom_byte(a + 3);
+}
+
+static void md_sram_init(void)
+{
+    if (md_sram) free(md_sram);
+    md_sram = NULL;
+    md_sram_base = md_sram_size = 0;
+    md_sram_changes = 0;
+    if (md_rom_size < 0x200 || md_rom_byte(0x1B0) != 'R' || md_rom_byte(0x1B1) != 'A')
+      return;
+    const unsigned int base = md_rom_long(0x1B4) & 0xFFFFFE, last = md_rom_long(0x1B8) | 1;
+    if (last < base || base < md_rom_size || last >= 0x400000 || last - base + 1 < 0x800)
+      return;
+    unsigned int size = last - base + 1;
+    if (size > 0x10000) size = 0x10000;
+#ifdef ARDUINO
+    md_sram = (unsigned char *)heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!md_sram) md_sram = (unsigned char *)malloc(size);
+#else
+    md_sram = (unsigned char *)malloc(size);
+#endif
+    if (!md_sram) return;
+    memset(md_sram, 0xFF, size);
+    md_sram_base = base;
+    md_sram_size = size;
+    printf("backup RAM %06X-%06X (%u bytes)\n", base, base + size - 1, size);
+}
+
+/* 2026-11-24 (GPLv3 section 5a) MegaDrive for TTGO VGA32: "SEGA" somewhere in the 16 bytes of the header at 100h */
+static int md_has_sega(const unsigned char *p)
+{
+    for (int i = 0; i + 3 <= 16; ++i) if (p[i] == 'S' && p[i + 1] == 'E' && p[i + 2] == 'G') return 1;
+    return 0;
+}
+
 void load_cartridge(unsigned char *buffer, size_t size)
 {
     // Clear all volatile memory
@@ -124,7 +184,18 @@ void load_cartridge(unsigned char *buffer, size_t size)
     ROM_DATA = buffer;
 
     // https://github.com/franckverrot/EmulationResources/blob/master/consoles/megadrive/genesis_rom.txt
-    if (ROM_DATA[1] == 0x03 && ROM_DATA[8] == 0xAA && ROM_DATA[9] == 0xBB)
+    // 2026-11-24 (GPLv3 section 5a) MegaDrive for TTGO VGA32: SMD files are also recognised when the copier header
+    // does not say 03h / AAh BBh (many dumps have 00h or 01h there): the size is 16 KB blocks + 512 and "SEGA" is not
+    // at 100h, but it is at 100h of the de-interleaved first block. A file with only the 512-byte header (not
+    // interleaved, "SEGA" at 300h) just loses the header.
+    int smd = ROM_DATA[1] == 0x03 && ROM_DATA[8] == 0xAA && ROM_DATA[9] == 0xBB;
+    if (!smd && size > 0x4000 + 512 && (size & 0x3FFF) == 512 && !md_has_sega(ROM_DATA + 0x100)) {
+      unsigned char h[16];
+      for (int j = 0; j < 8; ++j) { h[j * 2] = ROM_DATA[512 + 0x2000 + 0x80 + j]; h[j * 2 + 1] = ROM_DATA[512 + 0x80 + j]; }
+      if (md_has_sega(h)) smd = 1;
+      else if (md_has_sega(ROM_DATA + 0x300)) { memmove(ROM_DATA, ROM_DATA + 512, size - 512); size -= 512; }
+    }
+    if (smd)
     {
       printf("--SMD de-interleave mode--\n");
       memmove(ROM_DATA, ROM_DATA + 512, size - 512);
@@ -154,6 +225,7 @@ void load_cartridge(unsigned char *buffer, size_t size)
 
 
     md_rom_size = (unsigned int)size;
+    md_sram_init();
     set_region();
 }
 
@@ -629,11 +701,27 @@ static inline void gwenesis_bus_write_memory_16(unsigned int address,
 #endif
 #define MD_PAGE(a) (((a) >> 16) & 0xFF)
 
+static inline unsigned int md_cart_read_8(unsigned int a)
+{
+  const unsigned int o = a - md_sram_base;
+  return o < md_sram_size ? md_sram[o] : 0xFF;
+}
+static inline unsigned int md_cart_read_16(unsigned int a)
+{
+  const unsigned int o = a - md_sram_base;
+  return o + 1 < md_sram_size ? (md_sram[o] << 8) | md_sram[o + 1] : 0xFFFF;
+}
+static inline void md_cart_write_8(unsigned int a, unsigned int value)
+{
+  const unsigned int o = a - md_sram_base;
+  if (o < md_sram_size && md_sram[o] != (unsigned char)value) { md_sram[o] = (unsigned char)value; md_sram_changes++; }
+}
+
 unsigned int MD_BUS_FAST m68k_read_memory_8(unsigned int address)
 {
   const unsigned int page = MD_PAGE(address);
   if (page == 0xFF) return FETCH8RAM(address);
-  if (page < 0x80) return (address & 0x7FFFFF) < md_rom_size ? FETCH8ROM(address & 0x7FFFFF) : 0xFF;
+  if (page < 0x80) return (address & 0x7FFFFF) < md_rom_size ? FETCH8ROM(address & 0x7FFFFF) : md_cart_read_8(address & 0x7FFFFF);
   return gwenesis_bus_read_memory_8(address);
 }
 
@@ -641,7 +729,7 @@ unsigned int MD_BUS_FAST m68k_read_memory_16(unsigned int address)
 {
   const unsigned int page = MD_PAGE(address);
   if (page == 0xFF) return FETCH16RAM(address);
-  if (page < 0x80) return (address & 0x7FFFFF) < md_rom_size ? FETCH16ROM(address & 0x7FFFFF) : 0xFFFF;
+  if (page < 0x80) return (address & 0x7FFFFF) < md_rom_size ? FETCH16ROM(address & 0x7FFFFF) : md_cart_read_16(address & 0x7FFFFF);
   return gwenesis_bus_read_memory_16(address);
 }
 
@@ -654,7 +742,7 @@ void MD_BUS_FAST m68k_write_memory_8(unsigned int address, unsigned int value)
 {
   const unsigned int page = MD_PAGE(address);
   if (page == 0xFF) { WRITE8RAM(address, value); return; }
-  if (page < 0x80) return;
+  if (page < 0x80) { md_cart_write_8(address & 0x7FFFFF, value); return; }
   gwenesis_bus_write_memory_8(address, value);
 }
 
@@ -662,6 +750,7 @@ void MD_BUS_FAST m68k_write_memory_16(unsigned int address, unsigned int value)
 {
   const unsigned int page = MD_PAGE(address);
   if (page == 0xFF) { WRITE16RAM(address, value); return; }
+  if (page < 0x80) { md_cart_write_8(address & 0x7FFFFF, value >> 8); md_cart_write_8((address & 0x7FFFFF) + 1, value & 0xFF); return; }
   gwenesis_bus_write_memory_16(address, value);
 }
 
@@ -688,6 +777,7 @@ void gwenesis_bus_save_state() {
   saveGwenesisStateSetBuffer(state, "TMSS", TMSS, sizeof(TMSS));
   saveGwenesisStateSet(state, "tmss_state", tmss_state);
   saveGwenesisStateSet(state, "tmss_count", tmss_count);
+  if (md_sram_size) saveGwenesisStateSetBuffer(state, "SRAM", md_sram, md_sram_size);
 }
 
 void gwenesis_bus_load_state() {
@@ -697,4 +787,5 @@ void gwenesis_bus_load_state() {
     saveGwenesisStateGetBuffer(state, "TMSS", TMSS, sizeof(TMSS));
     tmss_state = saveGwenesisStateGet(state, "tmss_state");
     tmss_count = saveGwenesisStateGet(state, "tmss_count");
+    if (md_sram_size) { saveGwenesisStateGetBuffer(state, "SRAM", md_sram, md_sram_size); md_sram_changes++; }
 }

@@ -24,6 +24,17 @@ __license__ = "GPLv3"
 #define BIT(v, idx) (((v) >> (idx)) & 1)
 #define BITS(v, idx, n) (((v) >> (idx)) & ((1 << (n)) - 1))
 
+/* 2026-11-24 (GPLv3 section 5a) MegaDrive for TTGO VGA32: MD_HINT_LATCH 1 = turning register 0 bit 4 (line
+   interrupt enable) off while a line interrupt is pending (raised, not taken yet) drops the interrupt line and
+   keeps it pending; turning the bit on again raises it (Genesis Plus GX, vdp_reg_w). Burning Force turns the
+   line interrupt off in its last handler of the frame, after the next one has come, and on again in the
+   vertical blank, and counts on that one coming then. A line interrupt that comes while the bit is off is
+   still not kept (Cotton counts on that). 0 = as before (the line stayed raised: the pending one came right
+   after the handler) */
+#ifndef MD_HINT_LATCH
+#define MD_HINT_LATCH 1
+#endif
+
 // VDP registers
 #define REG0_DISABLE_DISPLAY (gwenesis_vdp_regs[0] & 1)
 #define REG0_HVLATCH BIT(gwenesis_vdp_regs[0], 1)

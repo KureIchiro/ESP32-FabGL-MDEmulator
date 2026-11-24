@@ -13,6 +13,9 @@
 #endif
 #include "md_sound.h"
 #include "ym2203.h"
+extern "C" {
+#include "gwenesis_savestate.h"
+}
 #include <string.h>
 #include <stdlib.h>
 #ifdef ARDUINO
@@ -49,6 +52,21 @@ static void qPush(uint32_t t, uint16_t reg, uint8_t val) {
 }
 
 static uint16_t ymAddr = 0;
+static uint8_t ymShadow[0x200];
+static struct { uint16_t tone[3]; uint8_t vol[4], noise, latchCh, latchType; } psgSh;
+static void psgShadow(uint8_t v) {
+  if (v & 0x80) {
+    psgSh.latchCh = (v >> 5) & 3;
+    psgSh.latchType = (v >> 4) & 1;
+    if (psgSh.latchType) psgSh.vol[psgSh.latchCh] = v & 15;
+    else if (psgSh.latchCh < 3) psgSh.tone[psgSh.latchCh] = (uint16_t)((psgSh.tone[psgSh.latchCh] & 0x3F0) | (v & 15));
+    else psgSh.noise = v & 7;
+  } else {
+    if (psgSh.latchType) psgSh.vol[psgSh.latchCh] = v & 15;
+    else if (psgSh.latchCh < 3) psgSh.tone[psgSh.latchCh] = (uint16_t)((psgSh.tone[psgSh.latchCh] & 15) | ((v & 0x3F) << 4));
+    else psgSh.noise = v & 7;
+  }
+}
 static struct {
   uint16_t na; uint8_t nb, ctrl, status;
   int64_t cntA, cntB;
@@ -92,6 +110,8 @@ extern "C" {
 
 void mdSoundResetChips(void) {
   memset(&tm, 0, sizeof(tm));
+  memset(ymShadow, 0, sizeof(ymShadow));
+  memset(&psgSh, 0, sizeof(psgSh));
   tm.last = md_frame_base;
   ymAddr = 0;
   qPush(md_frame_base, REG_RESET, 0);
@@ -101,8 +121,34 @@ void YM2612Init(void) {}
 void YM2612Config(unsigned char dac_bits) { (void)dac_bits; }
 void YM2612ResetChip(void) { mdSoundResetChips(); }
 void ym2612_run(int target) { (void)target; }
-void gwenesis_ym2612_save_state(void) {}
-void gwenesis_ym2612_load_state(void) {}
+void gwenesis_ym2612_save_state(void) {
+  SaveState *s = saveGwenesisStateOpenForWrite("ym2612");
+  saveGwenesisStateSetBuffer(s, "regs", ymShadow, sizeof(ymShadow));
+  saveGwenesisStateSetBuffer(s, "timer", &tm, sizeof(tm));
+  saveGwenesisStateSet(s, "addr", ymAddr);
+}
+void gwenesis_ym2612_load_state(void) {
+  SaveState *s = saveGwenesisStateOpenForRead("ym2612");
+  saveGwenesisStateGetBuffer(s, "regs", ymShadow, sizeof(ymShadow));
+  saveGwenesisStateGetBuffer(s, "timer", &tm, sizeof(tm));
+  ymAddr = (uint16_t)saveGwenesisStateGet(s, "addr");
+  tm.last = md_frame_base;
+  const uint32_t t = md_frame_base;
+  qPush(t, REG_RESET, 0);
+  qPush(t, 0x22, ymShadow[0x22]);
+  qPush(t, 0x27, (uint8_t)(ymShadow[0x27] & 0xC0));
+  qPush(t, 0x2B, ymShadow[0x2B]);
+  qPush(t, 0x2A, ymShadow[0x2A]);
+  for (int port = 0; port < 2; port++) {
+    const uint16_t b = (uint16_t)(port << 8);
+    for (int r = 0x30; r <= 0x9F; r++) if ((r & 3) != 3) qPush(t, (uint16_t)(b | r), ymShadow[b | r]);
+    for (int r = 0xB0; r <= 0xB6; r++) if ((r & 3) != 3) qPush(t, (uint16_t)(b | r), ymShadow[b | r]);
+    for (int k = 0; k < 3; k++) {
+      qPush(t, (uint16_t)(b | (0xA4 + k)), ymShadow[b | (0xA4 + k)]); qPush(t, (uint16_t)(b | (0xA0 + k)), ymShadow[b | (0xA0 + k)]);
+      qPush(t, (uint16_t)(b | (0xAC + k)), ymShadow[b | (0xAC + k)]); qPush(t, (uint16_t)(b | (0xA8 + k)), ymShadow[b | (0xA8 + k)]);
+    }
+  }
+}
 
 void MD_SND_FAST YM2612Write(unsigned int a, unsigned int v, int target) {
   v &= 0xFF;
@@ -114,6 +160,7 @@ void MD_SND_FAST YM2612Write(unsigned int a, unsigned int v, int target) {
   const uint32_t t = md_frame_base + (uint32_t)target;
   const uint16_t addr = ymAddr;
   const uint8_t reg = (uint8_t)addr;
+  ymShadow[addr & 0x1FF] = (uint8_t)v;
   if (addr < 0x100) {
     if (reg >= 0x24 && reg <= 0x27) { timerAdvance(t); timerWrite(reg, (uint8_t)v); qPush(t, addr, (uint8_t)v); return; }
     if (reg == 0x22 || reg == 0x28 || reg == 0x2A || reg == 0x2B || (reg >= 0x30 && reg <= 0xB6)) qPush(t, addr, (uint8_t)v);
@@ -131,9 +178,26 @@ void gwenesis_SN76489_Init(int PSGClockValue, int SamplingRate, int freq_divisor
 void gwenesis_SN76489_Reset(void) {}
 void gwenesis_SN76489_start(void) {}
 void gwenesis_SN76489_run(int target) { (void)target; }
-void gwenesis_sn76489_save_state(void) {}
-void gwenesis_sn76489_load_state(void) {}
+void gwenesis_sn76489_save_state(void) {
+  SaveState *s = saveGwenesisStateOpenForWrite("sn76489");
+  saveGwenesisStateSetBuffer(s, "regs", &psgSh, sizeof(psgSh));
+}
+void gwenesis_sn76489_load_state(void) {
+  SaveState *s = saveGwenesisStateOpenForRead("sn76489");
+  saveGwenesisStateGetBuffer(s, "regs", &psgSh, sizeof(psgSh));
+  const uint32_t t = md_frame_base;
+  for (int c = 0; c < 3; c++) {
+    qPush(t, REG_PSG, (uint8_t)(0x80 | (c << 5) | (psgSh.tone[c] & 15)));
+    qPush(t, REG_PSG, (uint8_t)((psgSh.tone[c] >> 4) & 0x3F));
+  }
+  qPush(t, REG_PSG, (uint8_t)(0xE0 | psgSh.noise));
+  for (int c = 0; c < 4; c++) qPush(t, REG_PSG, (uint8_t)(0x90 | (c << 5) | psgSh.vol[c]));
+  const uint8_t lc = psgSh.latchCh, lt = psgSh.latchType;
+  const uint8_t low = lt ? psgSh.vol[lc] : (lc < 3 ? (uint8_t)(psgSh.tone[lc] & 15) : psgSh.noise);
+  qPush(t, REG_PSG, (uint8_t)(0x80 | (lc << 5) | (lt << 4) | low));
+}
 void MD_SND_FAST gwenesis_SN76489_Write(int data, int target) {
+  psgShadow((uint8_t)data);
   qPush(md_frame_base + (uint32_t)target, REG_PSG, (uint8_t)data);
 }
 
@@ -274,7 +338,7 @@ void mdSoundFill(void) {
       if (d >= (int32_t)span + 1) break;
       if ((qData[k] >> 8) == 0x2A) continue;
       if ((int32_t)(qTime[k] - emu) <= 0) {
-        int m = (int)((((uint64_t)d << 16) + clkPerSampleQ16 - 1) / clkPerSampleQ16);
+        const int m = d > 0 ? (int)((((uint64_t)d << 16) + clkPerSampleQ16 - 1) / clkPerSampleQ16) : 1;
         if (m < n) n = m;
       }
       break;

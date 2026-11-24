@@ -305,6 +305,9 @@ static inline __attribute__((always_inline)) void gwenesis_vdp_register_w(int re
     if ((BIT(gwenesis_vdp_regs[0x1], 2)==0) && reg > 0xA)
         return;
 
+#if MD_HINT_LATCH
+    const unsigned char old_value = gwenesis_vdp_regs[reg];
+#endif
     gwenesis_vdp_regs[reg] = value;
     vdpm_log(__FUNCTION__, "reg:%02d <- %02x", reg, value);
 
@@ -318,6 +321,18 @@ static inline __attribute__((always_inline)) void gwenesis_vdp_register_w(int re
     {
     case 0:
 
+#if MD_HINT_LATCH
+        /* 2026-11-24 (GPLv3 section 5a) MegaDrive for TTGO VGA32: the line interrupt enable (bit 4) changed while
+           a line interrupt is pending: raise or drop the interrupt line (Genesis Plus GX, vdp_reg_w) */
+        if (((old_value ^ value) & 0x10) && hint_pending) {
+          if (REG1_VBLANK_INTERRUPT && (gwenesis_vdp_status & STATUS_VIRQPENDING))
+            m68k_set_irq(6);
+          else if (value & 0x10)
+            m68k_set_irq(4);
+          else
+            m68k_set_irq(0);
+        }
+#endif
         if (REG0_HVLATCH && (hvcounter_latched == 0))
         {
             hvcounter_latch = gwenesis_vdp_hvcounter();
@@ -683,6 +698,10 @@ void gwenesis_vdp_dma_copy()
    // DMA_RUN=1;
 
     int dma_length = REG19_DMA_LENGTH;
+    /* 2026-11-24 (GPLv3 section 5a) MegaDrive for TTGO VGA32: a length of 0 is 10000h, as on the real VDP (it counted
+       down from -1, about 4 billion times: Star Cruiser stopped there) */
+    if (dma_length == 0)
+        dma_length = 0x10000;
     unsigned short src_addr_low = REG21_DMA_SRCADDR_LOW;
     //vdpm_log(__FUNCTION__,"length:%x src:%x",dma_length,src_addr_low);
 
@@ -1048,6 +1067,8 @@ void gwenesis_vdp_mem_load_state() {
   saveGwenesisStateGetBuffer(state, "fifo", fifo, sizeof(fifo));
   saveGwenesisStateGetBuffer(state, "CRAM565", CRAM565, sizeof(CRAM565));
   saveGwenesisStateGetBuffer(state, "VSRAM", VSRAM, sizeof(VSRAM));
+  /* 2026-11-24 (GPLv3 section 5a) MegaDrive for TTGO VGA32: the VGA pixel of each colour (md_pix) from CRAM565 */
+  for (int i = 0; i < 64; i++) md_pix_set(i, CRAM565[i]);
   code_reg = saveGwenesisStateGet(state, "code_reg");
   address_reg = saveGwenesisStateGet(state, "address_reg");
   command_word_pending = saveGwenesisStateGet(state, "command_word_pending");

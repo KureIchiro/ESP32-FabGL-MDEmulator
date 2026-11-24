@@ -86,6 +86,17 @@
  *    md_z80_read / md_z80_write。プログラムカウンタとサイクル数はローカル変数で持つ。実行の本体は IRAM、ED 命令はフラッシュ
  *  ・非公開の命令(IXH / IXL、DD CB の結果をレジスタにも入れる形、ED の別名)、フラグの 5・3 ビット、MEMPTR、
  *    R レジスタも資料どおり
+ *  2026-11-24 足した・直した。
+ *  ・ステートセーブ: F9 / F10 / F11 でスロット 2 / 1 / 0 を読み込み、Shift を押しながらで保存(/MD/SAVE)。
+ *    中身は gwenesis の各部品の値(md_glue.c)と音源のレジスタの控え(md_sound.cpp。読み込むとリセットして書き直す)
+ *  ・ヘッダの 2 バイト目が 03h でない SMD 形式のファイル(インターリーブ)も解くようにした(gwenesis_bus.c)
+ *  ・H 割り込みを、各ラインに入るときに数える(0 ラインの前にも。MD_HINT_EARLY)。コットンの最上部の横線を直した
+ *  ・保留中の H 割り込みを、無効にしてから有効に戻したときに入れる(MD_HINT_LATCH)。バーニングフォースの海の下の帯と、
+ *    下のステータス表示の上半分の欠けを直した
+ *  ・68000 の ROM の読み出しを、読み込んだ ROM の中だけにした(md_m68k.h)。外(スタークルーザーのバックアップ RAM
+ *    200000h など)は ROM バッファの外を読んでいた(PC では落ち、ESP32 では PSRAM のほかのデータ)。今までどおり FFh
+ *  ・カートリッジのバックアップ RAM(ROM のヘッダに書いてあるもの。2MB を超える ROM の切り替え式と EEPROM は除く)。
+ *    /MD/SAVE/<ROM の名前>.srm に自動で保存し、始めるときに読む(gwenesis_bus.c)
  *
  * 【必要なファイル（SDカード）】
  *  /MD/ROM の .md / .gen / .bin / .smd : ROM(フォルダに分けてもよい)。起動すると一覧が出る
@@ -95,6 +106,7 @@
  *  コントローラ(Serial1。1P 専用・4 ボタン): 方向、ボタン1 = A、ボタン2 = B、ボタン3 = C、ボタン4 = START
  *  (ROM の一覧のいちばん上の行で C B A にもできる。キーボードの Z / C も入れ替わる)
  *  F12: 一時停止 / 再開。Shift+F12: リセット(ESP32 ごと。ROM の一覧に戻る)
+ *  F9 / F10 / F11: ステートのスロット 2 / 1 / 0 を読み込む。Shift+F9 / F10 / F11: 保存
  *  Shift+F8: スプライトの横の枚数制限(1 ラインに 20 個)を外す / 戻す(ちらつきが減るゲームがある。重い場面は遅くなる)
  *  ROM の一覧で TAB / ボタン3: 次に起動する機種(EmuLauncher を使うときだけ)
  * ============================================================================
@@ -175,6 +187,9 @@ extern int screen_width, screen_height;
 extern int hint_pending;
 extern unsigned char button_state[3];
 extern unsigned int md_rom_size;
+extern unsigned char *md_sram;
+extern unsigned int md_sram_size;
+extern volatile unsigned int md_sram_changes;
 extern uint8_t **md_rows;
 extern uint8_t md_sync;
 extern int md_yofs;
@@ -285,6 +300,8 @@ static void flashStatus(const char *msg, uint32_t ms) {
   if (!statusUntil) statusUntil = 1;
 }
 static void statusTick();
+static volatile int stateReq = 0;
+static String romPath;
 
 static void updateKeyboard() {
   static bool isBreak = false, isE0 = false;
@@ -316,6 +333,10 @@ static void updateKeyboard() {
         if (!down || !shiftDown) break;
         md_sprite_nolimit = !md_sprite_nolimit;
         flashStatus(md_sprite_nolimit ? "NO LIMIT SPRITES" : "LIMIT SPRITES", 1000);
+        break;
+      case 0x01: case 0x09: case 0x78:
+        if (!down) break;
+        stateReq = 0x10 | (sc == 0x01 ? 2 : sc == 0x09 ? 1 : 0) | (shiftDown ? 0x80 : 0);
         break;
       case 0x07:
         if (!down) break;
@@ -629,6 +650,9 @@ static void vgaWaitVblank(int64_t frameStart) {
 
 #define MD_FRAME_US 16683
 
+#ifndef MD_HINT_EARLY
+#define MD_HINT_EARLY 1
+#endif
 #ifndef MD_VINT_DELAY
 #define MD_VINT_DELAY 788
 #endif
@@ -653,6 +677,77 @@ static void renderService() {
   renderDone = d + 1;
 }
 
+extern "C" const uint8_t *md_state_save(size_t *len);
+extern "C" uint8_t *md_state_buffer(size_t *cap);
+extern "C" int md_state_load(size_t len);
+static String saveBase() {
+  String name = romPath.substring(romPath.lastIndexOf('/') + 1);
+  const int dot = name.lastIndexOf('.');
+  if (dot > 0) name = name.substring(0, dot);
+  return String(MD_DIR "/SAVE/") + name;
+}
+
+static void doStateRequest(int req) {
+  const int slot = req & 0x0F;
+  const bool save = (req & 0x80) != 0;
+  const String path = saveBase() + "_" + String(slot) + ".sta";
+  char msg[40];
+  if (save) {
+    size_t len = 0;
+    const uint8_t *p = md_state_save(&len);
+    bool ok = false;
+    if (p) {
+      if (!SD.exists(MD_DIR "/SAVE")) SD.mkdir(MD_DIR "/SAVE");
+      File f = SD.open(path, FILE_WRITE);
+      if (f) { ok = f.write(p, len) == len; f.close(); }
+    }
+    snprintf(msg, sizeof(msg), ok ? "STATE %d SAVED" : "STATE %d SAVE ERROR", slot);
+  } else {
+    File f = SD.open(path, FILE_READ);
+    if (!f) snprintf(msg, sizeof(msg), "NO STATE %d", slot);
+    else {
+      size_t cap = 0;
+      uint8_t *p = md_state_buffer(&cap);
+      const size_t len = f.size();
+      const bool rd = p && len <= cap && f.read(p, len) == len;
+      f.close();
+      snprintf(msg, sizeof(msg), rd && md_state_load(len) == 0 ? "STATE %d LOADED" : "STATE %d LOAD ERROR", slot);
+    }
+  }
+  Serial.println(msg);
+  flashStatus(msg, 1000);
+}
+
+static void sramLoad() {
+  if (!md_sram_size) return;
+  File f = SD.open(saveBase() + ".srm", FILE_READ);
+  if (!f) return;
+  const size_t n = f.read(md_sram, md_sram_size);
+  f.close();
+  Serial.printf("backup RAM loaded: %u bytes\n", (unsigned)n);
+}
+
+static bool sramWrite() {
+  if (!SD.exists(MD_DIR "/SAVE")) SD.mkdir(MD_DIR "/SAVE");
+  File f = SD.open(saveBase() + ".srm", FILE_WRITE);
+  if (!f) return false;
+  const bool ok = f.write(md_sram, md_sram_size) == md_sram_size;
+  f.close();
+  return ok;
+}
+
+static void sramAutoSave() {
+  static unsigned int seen = 0;
+  static uint32_t changedAt = 0;
+  static bool pending = false;
+  const unsigned int n = md_sram_changes;
+  if (n != seen) { seen = n; changedAt = millis(); pending = true; return; }
+  if (pending && (uint32_t)(millis() - changedAt) >= 2000) {
+    pending = false;
+    if (!sramWrite()) flashStatus("SRAM SAVE ERROR", 1000);
+  }
+}
+
 void cpuTask(void *pvParameters) {
   const int64_t frameTimeUs = MD_FRAME_US;
   int64_t nextFrameTime = esp_timer_get_time();
@@ -667,6 +762,8 @@ void cpuTask(void *pvParameters) {
 
   while (1) {
     renderWait();
+    if (stateReq) { const int r = stateReq; stateReq = 0; doStateRequest(r); }
+    if (md_sram_size) sramAutoSave();
     if (isPaused) {
       cpuStopped = true;
       vTaskDelay(pdMS_TO_TICKS(10));
@@ -700,6 +797,15 @@ void cpuTask(void *pvParameters) {
     system_clock = 0;
     zclk = 0;
     scan_line = 0;
+#if MD_HINT_EARLY
+    if (--hint_counter < 0) {
+      if (REG0_LINE_INTERRUPT != 0) {
+        hint_pending = 1;
+        if ((gwenesis_vdp_status & STATUS_VIRQPENDING) == 0) m68k_update_irq(4);
+      }
+      hint_counter = REG10_LINE_COUNTER;
+    }
+#endif
     while (scan_line < lines_per_frame) {
       if (draw && renderOnCore1 && scan_line == screen_height) {
         renderWait();
@@ -726,6 +832,16 @@ void cpuTask(void *pvParameters) {
           gwenesis_vdp_render_line(scan_line);
         }
       }
+#if MD_HINT_EARLY
+      if (scan_line + 1 > screen_height) hint_counter = REG10_LINE_COUNTER;
+      else if (--hint_counter < 0) {
+        if (REG0_LINE_INTERRUPT != 0) {
+          hint_pending = 1;
+          if ((gwenesis_vdp_status & STATUS_VIRQPENDING) == 0) m68k_update_irq(4);
+        }
+        hint_counter = REG10_LINE_COUNTER;
+      }
+#else
       if ((scan_line == 0) || (scan_line > screen_height)) hint_counter = REG10_LINE_COUNTER;
       if (--hint_counter < 0) {
         if ((REG0_LINE_INTERRUPT != 0) && (scan_line <= screen_height)) {
@@ -734,6 +850,7 @@ void cpuTask(void *pvParameters) {
         }
         hint_counter = REG10_LINE_COUNTER;
       }
+#endif
       scan_line++;
       if (scan_line == screen_height) {
 #if !MD_VINT_DELAY
@@ -895,7 +1012,7 @@ void setup() {
       canvas->setPenColor(fabgl::Color::BrightRed);
       canvas->drawText(8, 32, "ROM LOAD ERROR (MAX 28MBIT)");
       delay(1500);
-    } else Serial.printf("ROM %s: %u bytes\n", path.c_str(), (unsigned)romSize);
+    } else { Serial.printf("ROM %s: %u bytes\n", path.c_str(), (unsigned)romSize); romPath = path; }
   }
 
   canvas->setBrushColor(fabgl::Color::Black);
@@ -914,6 +1031,7 @@ void setup() {
   vgaSyncSetup();
 
   load_cartridge(rom, romSize);
+  sramLoad();
   power_on();
   reset_emulation();
   Serial.printf("ROM in use: %u bytes\n", md_rom_size);

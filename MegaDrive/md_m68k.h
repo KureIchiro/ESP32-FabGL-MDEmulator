@@ -23,6 +23,7 @@
 #define ROM_SWAP
 extern unsigned char *ROM_DATA;
 extern unsigned char *M68K_RAM;
+extern unsigned int md_rom_size;
 
 #define FETCH8ROM(A)   (ROM_DATA[(A) ^ 1])
 #define FETCH16ROM(A)  (*(unsigned short *)&ROM_DATA[(A)])
@@ -40,9 +41,9 @@ extern unsigned char *M68K_RAM;
 #define m68k_read_pcrelative_16(A) m68k_read_immediate_16(A)
 #define m68k_read_pcrelative_32(A) m68k_read_immediate_32(A)
 
-#define MD_READ_8(A)   ((A) < 0x800000 ? FETCH8ROM(A)  : (A) >= 0xFF0000 ? FETCH8RAM(A)  : m68k_read_memory_8(A))
-#define MD_READ_16(A)  ((A) < 0x800000 ? FETCH16ROM(A) : (A) >= 0xFF0000 ? FETCH16RAM(A) : m68k_read_memory_16(A))
-#define MD_READ_32(A)  ((A) < 0x800000 ? FETCH32ROM(A) : (A) >= 0xFF0000 ? FETCH32RAM(A) : m68k_read_memory_32(A))
+#define MD_READ_8(A)   ((A) < md_rom_size ? FETCH8ROM(A)  : (A) >= 0xFF0000 ? FETCH8RAM(A)  : m68k_read_memory_8(A))
+#define MD_READ_16(A)  ((A) < md_rom_size ? FETCH16ROM(A) : (A) >= 0xFF0000 ? FETCH16RAM(A) : m68k_read_memory_16(A))
+#define MD_READ_32(A)  ((A) + 2 < md_rom_size ? FETCH32ROM(A) : (A) >= 0xFF0000 ? FETCH32RAM(A) : m68k_read_memory_32(A))
 #define MD_WRITE_8(A, V)  do { if ((A) >= 0xFF0000) WRITE8RAM(A, V);  else m68k_write_memory_8(A, V); } while (0)
 #define MD_WRITE_16(A, V) do { if ((A) >= 0xFF0000) WRITE16RAM(A, V); else m68k_write_memory_16(A, V); } while (0)
 #define MD_WRITE_32(A, V) do { if ((A) >= 0xFF0000) WRITE32RAM(A, V); else m68k_write_memory_32(A, V); } while (0)
