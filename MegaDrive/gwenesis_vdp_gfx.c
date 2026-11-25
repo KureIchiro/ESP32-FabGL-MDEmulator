@@ -919,7 +919,10 @@ static void spr_list_build(int table_size)
   int sidx = 0, n = 0;
   for (int i = 0; (i < table_size) && sidx < table_size; ++i) {
     const uint8_t *cache = SAT_CACHE + sidx * 8;
-    spr_y0[n] = (int16_t)((((cache[0] & 0x3) << 8) | cache[1]) - 128);
+    /* 2026-11-25 (GPLv3 section 5a) MegaDrive for TTGO VGA32: Y and X of a sprite are 9 bits (0-511; 10 bits only in
+       the interlace mode 2, which this renderer does not draw). They were read as 10 bits, so a sprite with the bit 9
+       set was off the screen (Same! Same! Same! sets it: no sprites at all in the game) */
+    spr_y0[n] = (int16_t)((((cache[0] & 0x1) << 8) | cache[1]) - 128);
     spr_sh[n] = (uint8_t)(BITS(cache[2], 0, 2) + 1);
     spr_idx[n] = (uint8_t)sidx;
     n++;
@@ -966,7 +969,7 @@ void draw_sprites_over_planes(int line)
         if ((line >= sy) && (line < sy+sh*8))
         {
             const uint8_t *table = start_table + spr_idx[k]*8;
-            int sx = ((table[6] & 0x3) << 8) | table[7];
+            int sx = ((table[6] & 0x1) << 8) | table[7];
             uint16_t name = (table[4] << 8) | table[5];
             const int isflipv = table[4] & 0x10;
             const int isfliph = table[4] & 0x8;
@@ -1057,8 +1060,8 @@ void draw_sprites(int line)
 
     //uint8_t *cache = SAT_CACHE + sidx * 8;
 
-    int sy = ((cache[0] & 0x3) << 8) | cache[1];
-    int sx = ((table[6] & 0x3) << 8) | table[7];
+    int sy = ((cache[0] & 0x1) << 8) | cache[1];
+    int sx = ((table[6] & 0x1) << 8) | table[7];
     uint16_t name = (table[4] << 8) | table[5];
 
     int sh = BITS(cache[2], 0, 2) + 1;
@@ -1140,17 +1143,19 @@ void draw_sprites(int line)
 #undef gwenesis_vdp_regs
 #undef VSRAM
 
-void gwenesis_vdp_render_config()
-{
-#if MD_PLANEB_LUT
-  if (!planeb_lut_ready)
-    planeb_lut_build();
-#endif
-    mode_h40 = REG12_MODE_H40;
-    mode_pal = REG1_PAL;
+/* 2026-11-25 (GPLv3 section 5a) MegaDrive for TTGO VGA32: the values that come from registers 3 (window name
+   table), 12 (H40), 16 (plane size) and 17 (window columns) are worked out again when a line's registers differ
+   from the ones they were made from (they were made once a frame here, so a change in the middle of the frame was
+   lost: Burning Force moves the window name table and turns the window on at a raster split at the end of an
+   area, and the old table, the score panel, was shown) */
+static uint8_t cfg_r3 = 0xFF, cfg_r12 = 0xFF, cfg_r16 = 0xFF, cfg_r17 = 0xFF;
 
-    int ntwidth = BITS(gwenesis_vdp_regs[16], 0, 2);
-    int ntheight = BITS(gwenesis_vdp_regs[16], 4, 2);
+static void md_cfg_regs(uint8_t r3, uint8_t r12, uint8_t r16, uint8_t r17)
+{
+    cfg_r3 = r3; cfg_r12 = r12; cfg_r16 = r16; cfg_r17 = r17;
+
+    int ntwidth = BITS(r16, 0, 2);
+    int ntheight = BITS(r16, 4, 2);
     ntwidth = (ntwidth + 1) * 32;
     ntheight = (ntheight + 1) * 32;
     ntw_mask = ntwidth - 1;
@@ -1159,13 +1164,13 @@ void gwenesis_vdp_render_config()
 
     // Window & A planes separation
 
-    if (mode_h40)
-        base_w = ((REG3_NAMETABLE_W & 0x1e) << 11);
+    if (BIT(r12, 0))
+        base_w = ((BITS(r3, 1, 5) & 0x1e) << 11);
     else
-        base_w = ((REG3_NAMETABLE_W & 0x1f) << 11);
+        base_w = ((BITS(r3, 1, 5) & 0x1f) << 11);
 
 
-    bool window_right = BIT(gwenesis_vdp_regs[17], 7);
+    bool window_right = BIT(r17, 7);
 
     // int window_is_bugged = 0;
     PlanA_firstcol = 0;
@@ -1176,7 +1181,7 @@ void gwenesis_vdp_render_config()
 
     if (window_right) {
 
-      Window_firstcol = REG17_WINDOW_HPOS * 16;
+      Window_firstcol = (r17 & 0x1F) * 16;
       Window_lastcol = screen_width;
 
       if (Window_firstcol > Window_lastcol)
@@ -1187,7 +1192,7 @@ void gwenesis_vdp_render_config()
 
     } else {
       Window_firstcol = 0;
-      Window_lastcol = REG17_WINDOW_HPOS * 16;
+      Window_lastcol = (r17 & 0x1F) * 16;
       if (Window_lastcol > screen_width)
         Window_lastcol = screen_width;
 
@@ -1196,6 +1201,17 @@ void gwenesis_vdp_render_config()
       // if (Window_lastcol != 0)
       //      window_is_bugged = 1;
     }
+}
+
+void gwenesis_vdp_render_config()
+{
+#if MD_PLANEB_LUT
+  if (!planeb_lut_ready)
+    planeb_lut_build();
+#endif
+    mode_h40 = REG12_MODE_H40;
+    mode_pal = REG1_PAL;
+    md_cfg_regs(gwenesis_vdp_regs[3], gwenesis_vdp_regs[12], gwenesis_vdp_regs[16], gwenesis_vdp_regs[17]);
 }
 
 /******************************************************************************
@@ -1287,6 +1303,9 @@ void gwenesis_vdp_render_slot(int slot) { md_cur = &md_ring[slot]; md_render_lin
 static void md_render_line(int line)
 {
   mode_h40 = REG12_MODE_H40;
+  if (gwenesis_vdp_regs[3] != cfg_r3 || gwenesis_vdp_regs[12] != cfg_r12 || gwenesis_vdp_regs[16] != cfg_r16 ||
+      gwenesis_vdp_regs[17] != cfg_r17)
+    md_cfg_regs(gwenesis_vdp_regs[3], gwenesis_vdp_regs[12], gwenesis_vdp_regs[16], gwenesis_vdp_regs[17]);
 
   // interlace mode not implemented
   if (BITS(gwenesis_vdp_regs[12], 1, 2) != 0)
