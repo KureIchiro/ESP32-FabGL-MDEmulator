@@ -16,7 +16,7 @@ extern void m68040_fpu_op0(void);
 extern void m68040_fpu_op1(void);
 extern void m68881_mmu_ops(void);
 extern const unsigned char m68ki_cycles[][0x10000];
-extern void (*const m68ki_instruction_jump_table[0x10000])(void);
+extern int (*const m68ki_instruction_jump_table[0x10000])(void);
 extern void m68ki_build_opcode_table(void);
 
 #include "m68kops.h"
@@ -956,8 +956,25 @@ int MD_M68K_FAST m68k_execute(int num_cycles)
 #endif
 
 			REG_IR = m68ki_read_imm_16();
+#if MD_M68K_DISP
+			{
+				const uint r_ = m68k_disp_l1[REG_IR >> 6];
+				const m68k_op_fn f_ = r_ < MD_DISP_NREG ? m68k_disp_reg[r_][m68k_disp_slot[REG_IR & 63]]
+				                                         : m68k_disp_irr[r_ - MD_DISP_NREG][REG_IR & 63];
+#if MD_M68K_OPCYC
+				const int c_ = f_();
+				USE_CYCLES(c_);
+#else
+				f_();
+				USE_CYCLES(CYC_INSTRUCTION[REG_IR]);
+#endif
+			}
+#elif MD_M68K_OPCYC
+			{ const int c_ = m68ki_instruction_jump_table[REG_IR](); USE_CYCLES(c_); }
+#else
 			m68ki_instruction_jump_table[REG_IR]();
 			USE_CYCLES(CYC_INSTRUCTION[REG_IR]);
+#endif
 
 			/* Trace m68k_exception, if necessary */
 			m68ki_exception_if_trace(); /* auto-disable (see m68kcpu.h) */

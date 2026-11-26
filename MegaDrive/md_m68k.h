@@ -9,13 +9,34 @@
 #ifndef MD_M68K_H
 #define MD_M68K_H
 
+#ifndef MD_M68K_IRAM_SET
+#define MD_M68K_IRAM_SET 1
+#endif
+#ifndef MD_M68K_OPCYC
+#define MD_M68K_OPCYC 1
+#endif
+#ifndef MD_M68K_DISP
+#define MD_M68K_DISP 1
+#endif
+unsigned int md_m68k_disp_bytes(void);
+void md_m68k_disp_set(void *mem);
+
 #ifdef ARDUINO
 #include <esp_attr.h>
 #define MD_M68K_FAST IRAM_ATTR
 #define M68K_IRAM IRAM_ATTR
+#if MD_M68K_IRAM_SET
+#define M68K_IRAM_NEW IRAM_ATTR
+#define M68K_IRAM_OLD
+#else
+#define M68K_IRAM_NEW
+#define M68K_IRAM_OLD IRAM_ATTR
+#endif
 #else
 #define MD_M68K_FAST
 #define M68K_IRAM
+#define M68K_IRAM_NEW
+#define M68K_IRAM_OLD
 #endif
 
 #define MD_M68K_MCLK 7

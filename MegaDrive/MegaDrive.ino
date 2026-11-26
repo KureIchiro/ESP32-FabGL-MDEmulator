@@ -102,6 +102,15 @@
  *    ラインごとの値で描く(gwenesis_vdp_gfx.c)。バーニングフォースのエリアの終わりで画面が崩れていた
  *  ・スプライトの Y・X を 9 ビットで読む(10 ビットで読んでいた。gwenesis_vdp_gfx.c)。鮫!鮫!鮫! のスプライトが出なかった
  *  ・Z80 コア(z80core.c)を速くした(割込みの確認を必要なときだけにし、R レジスタを手元の変数に置いた。動きは同じ)
+ *  2026-11-26 直した。
+ *  ・MD_HINT_EARLY の既定を 0 に戻した(H 割り込みを表示したラインのあとで数える。Gwenesis・Genesis Plus GX と同じ)。
+ *    1 では H 割り込みが 1 ライン早く、アウトランの空に道路が重なり、パノラマコットンのゲーム中の空に縦の帯が出ていた
+ *  ・68000 を速くする第 1 段(動きは同じ。md_m68k.h のスイッチで前の作りに戻せる)
+ *    - IRAM に置く命令の処理を、14 本のゲームで数えた実行回数から選び直した(MD_M68K_IRAM_SET。IRAM の量は同じ。
+ *      IRAM で動く命令の割合 72% → 93%)
+ *    - 命令の処理が自分のクロック数を返し、実行ループはフラッシュの 64KB のクロック数の表を読まない(MD_M68K_OPCYC)
+ *  ・68000 を速くする第 1.5 段: 命令の振り分けを 2 段の表(約 21KB)にして、起動時に内部 RAM へ写す(MD_M68K_DISP)。
+ *    フラッシュの 256KB の表を命令ごとに読まない。内部 RAM は VRAM → Z80 の RAM → この表 → 68000 の RAM の順に取る
  *
  * 【必要なファイル（SDカード）】
  *  /MD/ROM の .md / .gen / .bin / .smd : ROM(フォルダに分けてもよい)。起動すると一覧が出る
@@ -159,10 +168,10 @@ extern "C" {
 #define MD_ROM_MAX (4u * 1024 * 1024)
 
 // TTGO VGA32
-#define SD_SCLK 14
-#define SD_MISO 2
-#define SD_MOSI 12
-#define SD_CS   13
+// #define SD_SCLK 14
+// #define SD_MISO 2
+// #define SD_MOSI 12
+// #define SD_CS   13
 
 // ORANGE ESPer
 // #define SD_SCLK 14
@@ -171,10 +180,10 @@ extern "C" {
 // #define SD_CS   13
 
 // Switch Science FabGL
-// #define SD_SCLK 14
-// #define SD_MISO 35
-// #define SD_MOSI 2
-// #define SD_CS   13
+#define SD_SCLK 14
+#define SD_MISO 35
+#define SD_MOSI 2
+#define SD_CS   13
 
 #define MD_SCREEN_W 320
 #define MD_SCREEN_H 240
@@ -656,11 +665,12 @@ static void vgaWaitVblank(int64_t frameStart) {
 #define MD_FRAME_US 16683
 
 #ifndef MD_HINT_EARLY
-#define MD_HINT_EARLY 1
+#define MD_HINT_EARLY 0
 #endif
 #ifndef MD_VINT_DELAY
 #define MD_VINT_DELAY 788
 #endif
+
 #ifndef MD_MAX_SKIP
 #define MD_MAX_SKIP 2
 #endif
@@ -980,6 +990,15 @@ void setup() {
 
   VRAM = allocFast(0x10000, 16 * 1024, "VRAM");
   ZRAM = allocFast(0x2000, 16 * 1024, "Z80 RAM");
+  {
+    const size_t n = md_m68k_disp_bytes();
+    void *p = nullptr;
+    if (heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL) >= n + 64 &&
+        heap_caps_get_free_size(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL) >= n + 16 * 1024)
+      p = heap_caps_malloc(n, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+    md_m68k_disp_set(p);
+    Serial.printf("68000 dispatch: %u bytes in %s\n", (unsigned)n, p ? "internal RAM" : "flash");
+  }
   M68K_RAM = allocFast(0x10000, 40 * 1024, "68000 RAM");
   uint8_t *ring = allocFast(gwenesis_vdp_render_ring_bytes(), 16 * 1024, "render ring");
   if (!VRAM || !ZRAM || !M68K_RAM || !ring) haltMessage("MEMORY ALLOCATION FAILED", nullptr);

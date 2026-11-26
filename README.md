@@ -12,8 +12,8 @@ It uses the same setup as the other emulators in this collection: ROM list at st
 
 ## Credits & License
 
-- **Emulation core**: Gwenesis by bzhxx (https://github.com/bzhxx/gwenesis; its source files are GPLv3 or later), as included in Retro-Gamer (GPLv3). Modified as listed in the header of `MegaDrive.ino` (changes dated 2026-11-12, 2026-11-13, 2026-11-16, 2026-11-17, 2026-11-18, 2026-11-19 and 2026-11-20).
-- **68000 CPU core**: Musashi by Karl Stenerud (MIT License, https://github.com/kstenerud/Musashi), configured and generated for the 68000 and modified as listed in the header of `MegaDrive.ino` (2026-11-20).
+- **Emulation core**: Gwenesis by bzhxx (https://github.com/bzhxx/gwenesis; its source files are GPLv3 or later), as included in Retro-Gamer (GPLv3). Modified as listed in the header of `MegaDrive.ino` (changes dated 2026-11-12 to 2026-11-26).
+- **68000 CPU core**: Musashi by Karl Stenerud (MIT License, https://github.com/kstenerud/Musashi), configured and generated for the 68000 and modified as listed in the header of `MegaDrive.ino` (2026-11-20 to 2026-11-26: tables made on a PC, two-level dispatch, handlers that return their clocks).
 - **Z80 CPU core**: z80core, written for this collection from the Z80 documentation (MIT License, Copyright Kure Ichiro; `z80core.c` / `z80core.h`).
 - **FM sound**: the YM2203/OPNA FM code of the PC-8801 emulator in this collection, used as the YM2612.
 - **Graphics/audio engine**: FabGL by Fabrizio Di Vittorio (GPLv3).
@@ -25,7 +25,7 @@ Like Gwenesis and FabGL, this sketch as a whole is distributed under the GPLv3 (
 ## 🛠️ Environment & Build Settings
 
 - **Board Manager**: ESP32 by Espressif Systems (**v2.0.5 Recommended**)
-- **Library**: FabGL v1.0.9
+- **Library**: FabGL v1.0.9, **with one file replaced** (required): copy `fabgl_patch/displaycontroller.cpp` over `FabGL/src/displaycontroller.cpp` in your Arduino libraries folder. The stock FabGL keeps its drawing routines in the ESP32's internal instruction RAM (IRAM), and with them this sketch does not fit (the link fails with "iram0_0_seg overflowed"). The patched file only keeps those routines in flash instead (about 8 KB of IRAM freed); nothing else changes, and other FabGL sketches keep working. It is the same file as in the MZ-2500 sketch and stays under FabGL's GPL v3 license (see `fabgl_patch/LICENSE`).
 - **Board**: `ESP32 Dev Module` (TTGO VGA32)
 - **PSRAM** (ON = `"Enabled"`, OFF = `"Disabled"`): With PSRAM ON, a software workaround for the chip errata (Espressif errata CPU-3.9) is built in, and the speed drops by about 20%. With PSRAM OFF, the sketch enables PSRAM by itself and the software workaround is not built in. However, this causes failures unless the ESP32 is chip revision 3 or later, so on any other revision a PSRAM OFF build is made not to start. This emulator is heavy, so an ESP32 of revision 3 or later with PSRAM OFF is recommended; with PSRAM ON it runs, but slower.
 - **Partition Scheme**: the default is fine (the program is about 1 MB).
@@ -67,15 +67,16 @@ Like Gwenesis and FabGL, this sketch as a whole is distributed under the GPLv3 (
 - **Picture**: each VDP line is written straight into FabGL's VGA line buffer (320×240, double-scanned to 640×480 at 59.94 Hz); there is no frame buffer and no copy. Each frame starts at the VGA vertical blank, so the picture does not tear. When a frame starts late, its drawing is skipped (at most two frames in a row). The lines are drawn on the other CPU core (the one that runs `loop()`, together with the sound): the emulation copies the VDP state a line needs (up to 32 lines are queued) and goes on without waiting for each line to be drawn. A VRAM or sprite-table change can show up to 32 lines early.
 - **Colours**: the VGA output of the TTGO VGA32 has 2 bits per colour (64 colours); the Mega Drive's 3 bits per colour are reduced to the top 2.
 - **Sound**: the YM2612 (FM 6 channels + DAC) and the SN76489 are generated at 16384 Hz on the other CPU core. The emulation only queues the register writes with their time; the YM2612 timers run on the emulation side.
-- **Memory**: VRAM, Z80 RAM and 68000 RAM are put in the ESP32's internal RAM in this order (whatever does not fit goes to PSRAM). The ROM is in PSRAM.
-- **68000**: Musashi set up for the 68000 only. Its opcode and cycle tables are made on a PC and kept in flash; the most used instructions run from the ESP32's internal instruction RAM (IRAM). ROM and 68000 RAM are read and written without a function call. Short wait loops that only poll the VDP status or memory are fast-forwarded to the end of the current line slice, with the same result as running them.
-- **Z80**: z80core, written for this collection (the undocumented instructions and flags included). Its main loop runs from IRAM, and the Z80 RAM is read and written without a function call.
-- **Interrupts**: the vertical interrupt is raised 788 master clocks into the first blanking line, so a line interrupt at the end of the last visible line is taken first (as on the real machine). The Z80's vertical interrupt stays asserted until the Z80 takes it.
+- **Memory**: VRAM, Z80 RAM, the 68000 dispatch table and 68000 RAM are put in the ESP32's internal RAM in this order (whatever does not fit goes to PSRAM, or stays in flash for the table). The ROM is in PSRAM.
+- **68000**: Musashi set up for the 68000 only, with the same results as Musashi. Each instruction finds its handler in a two-level table (about 21 KB, copied to internal RAM at start) instead of Musashi's 64K-entry table in flash, and the handler returns its clock count (no cycle table is read). The handlers run most often, chosen from a profile of many games, run from the ESP32's internal instruction RAM (IRAM): about 93% of the executed instructions. ROM and 68000 RAM are read and written without a function call. Short wait loops that only poll the VDP status or memory are fast-forwarded to the end of the current line slice, with the same result as running them.
+- **Z80**: z80core, written for this collection (the undocumented instructions and flags included). Its main loop runs from IRAM, the interrupt check runs only when something may have changed it, and the Z80 RAM is read and written without a function call.
+- **Interrupts**: the vertical interrupt is raised 788 master clocks into the first blanking line, so a line interrupt at the end of the last visible line is taken first (as on the real machine). A line interrupt that is pending while the game turns line interrupts off is taken when they are turned on again. The Z80's vertical interrupt stays asserted until the Z80 takes it.
+- **Build switches**: the speed-ups and the interrupt timings above can be switched back at the top of `md_m68k.h` (MD_M68K_*, MD_WAITSKIP) and `MegaDrive.ino` / `gwenesis_vdp.h` (MD_HINT_*, MD_VINT_DELAY). The defaults are recommended.
 
 ## Known limitations
 
 - 3-button pad (no 6-button pad), player 1 only.
-- No save states, no battery-backed save RAM, no cartridges with mappers or extra chips (SVP etc.).
+- No cartridges with mappers or extra chips (SVP etc.), no switched backup RAM of ROMs over 2 MB, no EEPROM saves.
 - Interlace mode is not shown; shadow / highlight colours are shown as normal colours (as in Gwenesis on embedded targets).
 - PAL (50 Hz) games run at the NTSC frame rate.
 - Speed: heavy scenes run slower than the real machine. Some games do not run correctly.
@@ -97,8 +98,8 @@ LILYGO TTGO VGA32(ESP32 + FabGL)用のメガドライブ / GENESIS のエミュ�
 
 ## クレジットとライセンス
 
-- **エミュレーションのコア**: bzhxx さんの Gwenesis(https://github.com/bzhxx/gwenesis。ソースのファイルは GPLv3 以降)。Retro-Gamer(GPLv3)に入っていたものを使い、`MegaDrive.ino` の先頭に書いたとおりに変えています(2026-11-12・2026-11-13・2026-11-16・2026-11-17・2026-11-18・2026-11-19・2026-11-20 の変更)。
-- **68000 CPU コア**: Karl Stenerud さんの Musashi(MIT ライセンス、https://github.com/kstenerud/Musashi)。68000 用に設定・生成し、`MegaDrive.ino` の先頭に書いたとおりに変えています(2026-11-20)。
+- **エミュレーションのコア**: bzhxx さんの Gwenesis(https://github.com/bzhxx/gwenesis。ソースのファイルは GPLv3 以降)。Retro-Gamer(GPLv3)に入っていたものを使い、`MegaDrive.ino` の先頭に書いたとおりに変えています(2026-11-12〜2026-11-26 の変更)。
+- **68000 CPU コア**: Karl Stenerud さんの Musashi(MIT ライセンス、https://github.com/kstenerud/Musashi)。68000 用に設定・生成し、`MegaDrive.ino` の先頭に書いたとおりに変えています(2026-11-20〜2026-11-26: PC で作った表、2 段の振り分け、クロック数を返す命令の処理)。
 - **Z80 CPU コア**: z80core。このシリーズのために Z80 の資料から新しく書いたものです(MIT ライセンス、Copyright Kure Ichiro。`z80core.c`・`z80core.h`)。
 - **FM 音源**: このシリーズの PC-8801 版の YM2203/OPNA の FM を YM2612 として使っています。
 - **グラフィック/オーディオエンジン**: Fabrizio Di Vittorio さんの FabGL(GPLv3)。
@@ -110,7 +111,7 @@ Gwenesis・FabGL と同じく、このスケッチ全体を GPLv3 で、ソー�
 ## 🛠️ 開発環境とビルド設定
 
 - **ボードマネージャ**: ESP32 by Espressif Systems(**v2.0.5 推奨**)
-- **ライブラリ**: FabGL v1.0.9
+- **ライブラリ**: FabGL v1.0.9。**ファイルを 1 つ差し替えてください**(必須): Arduino のライブラリのフォルダの `FabGL/src/displaycontroller.cpp` を、`fabgl_patch/displaycontroller.cpp` で上書きします。元の FabGL は描画の処理を ESP32 の内部の命令 RAM(IRAM)に置くため、そのままではこのスケッチが入りません(リンクで「iram0_0_seg overflowed」になります)。差し替えたファイルはその処理をフラッシュに置くだけで(IRAM が約 8KB 空きます)、ほかは何も変わらず、ほかの FabGL のスケッチもそのまま動きます。MZ-2500 版と同じファイルで、ライセンスは FabGL と同じ GPL v3 です(`fabgl_patch/LICENSE`)。
 - **ボード**: `ESP32 Dev Module`(TTGO VGA32)
 - **PSRAM**（ON = `"Enabled"`、OFF = `"Disabled"`）: PSRAMをONにするとソフトでのエラッタ対策が入り、20%程度速度が低下します。PSRAMをOFFにするとソフトでPSRAMを有効にし、ソフトでのエラッタ対策は入りません。但し、ESP32のリビジョンが3以降でないと不具合が発生するため、それ以外のリビジョンでPSRAMをOFFにしても起動しなくしてあります。このエミュレータは処理が重いので、リビジョン3以降のESP32でPSRAMをOFFにすることをお勧めします(ONでも動きますが、遅くなります)。
 - **Partition Scheme**: 既定のままでかまいません(プログラムは約 1MB)。
@@ -152,15 +153,16 @@ Gwenesis・FabGL と同じく、このスケッチ全体を GPLv3 で、ソー�
 - **画面**: VDP の 1 ラインを FabGL の VGA の行バッファへ直接書きます(320×240 を縦横 2 倍にして 640×480・59.94Hz で出す)。画面全体のバッファも写しもありません。フレームは VGA の垂直帰線で始めるので、絵が裂けません。予定より遅れて始まったフレームは描画を間引きます(続けて飛ばすのは 2 フレームまで)。ラインはもう一方の CPU コア(`loop()` のコア。音と同じ)で描きます。エミュレーションはそのラインが使う VDP の状態を写して(32 ライン分までためる)、1 ラインずつ描き終わりを待たずに先へ進みます。VRAM・スプライトの表の変化が最大 32 ライン早く出ることがあります。
 - **色**: TTGO VGA32 の VGA は 1 色 2 ビット(64 色)なので、メガドライブの 1 色 3 ビットの上の 2 ビットを使います。
 - **音**: YM2612(FM 6 チャンネル + DAC)と SN76489 は、もう一方の CPU コアで 16384Hz で作ります。エミュレーション側はレジスタの書き込みを時刻付きで積むだけで、YM2612 のタイマーはエミュレーション側で数えます。
-- **メモリ**: VRAM・Z80 の RAM・68000 の RAM を、この順に ESP32 の内部 RAM に置きます(入らないものは PSRAM)。ROM は PSRAM です。
-- **68000**: Musashi を 68000 だけの設定にしています。命令とサイクル数の表は PC で作ってフラッシュに置き、よく使う命令は ESP32 の内部の命令用 RAM(IRAM)で動かします。ROM と 68000 の RAM の読み書きは関数を呼ばずにその場でします。VDP の状態やメモリを読んで待つだけの短いループは、そのラインの区切りまで早送りします(結果は早送りしないときと同じ)。
-- **Z80**: このシリーズのために書いた z80core です(非公開の命令やフラグも扱います)。実行の本体は IRAM で動かし、Z80 の RAM の読み書きは関数を呼ばずにその場でします。
-- **割り込み**: V 割り込みは帰線期間の最初のラインに入って 788 マスタークロック後に出すので、最後の表示ラインの H 割り込みが先に受け付けられます(実機と同じ順)。Z80 の V 割り込みは、Z80 が受け付けるまで出したままにします。
+- **メモリ**: VRAM・Z80 の RAM・68000 の命令の振り分け表・68000 の RAM を、この順に ESP32 の内部 RAM に置きます(入らないものは PSRAM。振り分け表はフラッシュのまま)。ROM は PSRAM です。
+- **68000**: Musashi を 68000 だけの設定にしています(結果は Musashi と同じ)。命令の処理は、フラッシュにある Musashi の 6 万 5 千項目の表ではなく、2 段の表(約 21KB。起動時に内部 RAM へ写す)で探します。命令の処理は自分のクロック数を返すので、クロック数の表も読みません。多くのゲームで数えて実行回数の多かった命令の処理は、ESP32 の内部の命令用 RAM(IRAM)で動かします(実行される命令の約 93%)。ROM と 68000 の RAM の読み書きは関数を呼ばずにその場でします。VDP の状態やメモリを読んで待つだけの短いループは、そのラインの区切りまで早送りします(結果は早送りしないときと同じ)。
+- **Z80**: このシリーズのために書いた z80core です(非公開の命令やフラグも扱います)。実行の本体は IRAM で動かし、割り込みの確認は変わりうるときだけにし、Z80 の RAM の読み書きは関数を呼ばずにその場でします。
+- **割り込み**: V 割り込みは帰線期間の最初のラインに入って 788 マスタークロック後に出すので、最後の表示ラインの H 割り込みが先に受け付けられます(実機と同じ順)。H 割り込みが受け付けられる前にゲームが H 割り込みを無効にした場合は、有効に戻したときに受け付けます。Z80 の V 割り込みは、Z80 が受け付けるまで出したままにします。
+- **ビルドスイッチ**: 上の高速化と割り込みのタイミングは、`md_m68k.h`(MD_M68K_…、MD_WAITSKIP)と `MegaDrive.ino` / `gwenesis_vdp.h`(MD_HINT_…、MD_VINT_DELAY)の先頭で前の作りに戻せます。既定のままをお勧めします。
 
 ## できないこと
 
 - 3 ボタンのパッド(6 ボタンのパッドには対応していません)、1P だけです。
-- ステートセーブ、電池でバックアップされたセーブ、マッパーや追加のチップ(SVP など)のあるカートリッジには対応していません。
+- マッパーや追加のチップ(SVP など)のあるカートリッジ、2MB を超える ROM の切り替え式のバックアップ RAM、EEPROM のセーブには対応していません。
 - インターレースのモードは表示しません。シャドウ / ハイライトの色は普通の色で表示します(Gwenesis の組み込み用と同じ)。
 - PAL(50Hz)のソフトも NTSC のフレームの速さで動きます。
 - 速さ: 重い場面は実機より遅くなります。正しく動かないソフトもあります。
