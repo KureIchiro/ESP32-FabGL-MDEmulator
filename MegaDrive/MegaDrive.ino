@@ -168,10 +168,10 @@ extern "C" {
 #define MD_ROM_MAX (4u * 1024 * 1024)
 
 // TTGO VGA32
-#define SD_SCLK 14
-#define SD_MISO 2
-#define SD_MOSI 12
-#define SD_CS   13
+// #define SD_SCLK 14
+// #define SD_MISO 2
+// #define SD_MOSI 12
+// #define SD_CS   13
 
 // ORANGE ESPer
 // #define SD_SCLK 14
@@ -180,10 +180,10 @@ extern "C" {
 // #define SD_CS   13
 
 // Switch Science FabGL
-// #define SD_SCLK 14
-// #define SD_MISO 35
-// #define SD_MOSI 2
-// #define SD_CS   13
+#define SD_SCLK 14
+#define SD_MISO 35
+#define SD_MOSI 2
+#define SD_CS   13
 
 #define MD_SCREEN_W 320
 #define MD_SCREEN_H 240
