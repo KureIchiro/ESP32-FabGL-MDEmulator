@@ -111,6 +111,13 @@
  *    - 命令の処理が自分のクロック数を返し、実行ループはフラッシュの 64KB のクロック数の表を読まない(MD_M68K_OPCYC)
  *  ・68000 を速くする第 1.5 段: 命令の振り分けを 2 段の表(約 21KB)にして、起動時に内部 RAM へ写す(MD_M68K_DISP)。
  *    フラッシュの 256KB の表を命令ごとに読まない。内部 RAM は VRAM → Z80 の RAM → この表 → 68000 の RAM の順に取る
+ *  2026-11-27 直した。
+ *  ・H 割り込みを各ラインに入るときに数える形に戻し(MD_HINT_EARLY 1)、ラインを描く状態はそのラインの 68000 を
+ *    動かす前に写す(MD_CAPTURE_EARLY)。マーベルランドの話の場面で下の文字が出なかった。アウトラン・コットンは崩れない
+ *  ・帰線期間に入ってから V 割り込みまでの間、状態レジスタの V 割り込みの印を立てて読ませる(MD_VINT_FLAG)。
+ *    マーベルランドのデモプレイのあと真っ黒になって止まっていた
+ *  ・縦が倍の解像度のインターレースのモード(448 ライン)を、1 ラインおき(1 フィールド)で描く(gwenesis_vdp_gfx.c。
+ *    今までは何も描かなかった)。ソニック2のタイトルのあとの 2 人対戦のデモが真っ黒だった
  *
  * 【必要なファイル（SDカード）】
  *  /MD/ROM の .md / .gen / .bin / .smd : ROM(フォルダに分けてもよい)。起動すると一覧が出る
@@ -168,10 +175,10 @@ extern "C" {
 #define MD_ROM_MAX (4u * 1024 * 1024)
 
 // TTGO VGA32
-// #define SD_SCLK 14
-// #define SD_MISO 2
-// #define SD_MOSI 12
-// #define SD_CS   13
+#define SD_SCLK 14
+#define SD_MISO 2
+#define SD_MOSI 12
+#define SD_CS   13
 
 // ORANGE ESPer
 // #define SD_SCLK 14
@@ -180,10 +187,10 @@ extern "C" {
 // #define SD_CS   13
 
 // Switch Science FabGL
-#define SD_SCLK 14
-#define SD_MISO 35
-#define SD_MOSI 2
-#define SD_CS   13
+// #define SD_SCLK 14
+// #define SD_MISO 35
+// #define SD_MOSI 2
+// #define SD_CS   13
 
 #define MD_SCREEN_W 320
 #define MD_SCREEN_H 240
@@ -199,6 +206,7 @@ extern unsigned char gwenesis_vdp_regs[0x20];
 extern unsigned short gwenesis_vdp_status;
 extern int screen_width, screen_height;
 extern int hint_pending;
+extern unsigned char md_vint_flag;
 extern unsigned char button_state[3];
 extern unsigned int md_rom_size;
 extern unsigned char *md_sram;
@@ -665,7 +673,13 @@ static void vgaWaitVblank(int64_t frameStart) {
 #define MD_FRAME_US 16683
 
 #ifndef MD_HINT_EARLY
-#define MD_HINT_EARLY 0
+#define MD_HINT_EARLY 1
+#endif
+#ifndef MD_CAPTURE_EARLY
+#define MD_CAPTURE_EARLY MD_HINT_EARLY
+#endif
+#ifndef MD_VINT_FLAG
+#define MD_VINT_FLAG 1
 #endif
 #ifndef MD_VINT_DELAY
 #define MD_VINT_DELAY 788
@@ -683,6 +697,18 @@ static inline uint32_t ccountNow() {
 
 static inline void renderWait() {
   while (renderDone != renderQueued) {}
+}
+
+static inline void renderLine(int line) {
+  if (renderOnCore1) {
+    const uint32_t q = renderQueued;
+    while (q - renderDone >= MD_RENDER_RING) {}
+    gwenesis_vdp_render_capture_slot(line, (int)(q % MD_RENDER_RING));
+    renderQueued = q + 1;
+  } else {
+    gwenesis_vdp_render_capture(line);
+    gwenesis_vdp_render_line(line);
+  }
 }
 
 static void renderService() {
@@ -825,9 +851,14 @@ void cpuTask(void *pvParameters) {
       if (draw && renderOnCore1 && scan_line == screen_height) {
         renderWait();
       }
+#if MD_CAPTURE_EARLY
+      if (draw && scan_line < screen_height) renderLine(scan_line);
+#endif
 #if MD_VINT_DELAY
       if (scan_line == screen_height) {
+        md_vint_flag = MD_VINT_FLAG;
         m68k_run(system_clock + MD_VINT_DELAY);
+        md_vint_flag = 0;
         if (REG1_VBLANK_INTERRUPT != 0) {
           gwenesis_vdp_status |= STATUS_VIRQPENDING;
           m68k_set_irq(6);
@@ -836,17 +867,9 @@ void cpuTask(void *pvParameters) {
 #endif
       m68k_run(system_clock + VDP_CYCLES_PER_LINE);
       z80_run(system_clock + VDP_CYCLES_PER_LINE);
-      if (draw && scan_line < screen_height) {
-        if (renderOnCore1) {
-          const uint32_t q = renderQueued;
-          while (q - renderDone >= MD_RENDER_RING) {}
-          gwenesis_vdp_render_capture_slot(scan_line, (int)(q % MD_RENDER_RING));
-          renderQueued = q + 1;
-        } else {
-          gwenesis_vdp_render_capture(scan_line);
-          gwenesis_vdp_render_line(scan_line);
-        }
-      }
+#if !MD_CAPTURE_EARLY
+      if (draw && scan_line < screen_height) renderLine(scan_line);
+#endif
 #if MD_HINT_EARLY
       if (scan_line + 1 > screen_height) hint_counter = REG10_LINE_COUNTER;
       else if (--hint_counter < 0) {

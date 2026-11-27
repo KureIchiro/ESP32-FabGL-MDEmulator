@@ -381,11 +381,19 @@ void gwenesis_vdp_vram_write(unsigned int address, unsigned int value)
   }
 }
 
-static inline __attribute__((always_inline)) 
+/* 2026-11-27 (GPLv3 section 5a) MegaDrive for TTGO VGA32: md_vint_flag is 1 while the frame loop runs the 68000 from
+   the start of the first blank line up to the V interrupt (MD_VINT_DELAY in MegaDrive.ino). The status then reads the
+   V interrupt flag (bit 7) as set, as on the real VDP (the flag comes before the interrupt). Before, the flag was set
+   together with the interrupt and cleared when the interrupt was taken, so a game that waits for the flag with the
+   interrupt enabled never saw it (Marvel Land: black screen after the demo play) */
+unsigned char md_vint_flag = 0;
+
+static inline __attribute__((always_inline))
 unsigned short status_register_r(void)
 {
     unsigned short status = gwenesis_vdp_status; // & 0xF800;
-   // unsigned short status = gwenesis_vdp_status;// & 0xFC00;
+    if (md_vint_flag)
+        status |= STATUS_VIRQPENDING;
 
     int hc = gwenesis_vdp_hcounter();
    // int vc = gwenesis_vdp_vcounter();

@@ -70,14 +70,14 @@ Like Gwenesis and FabGL, this sketch as a whole is distributed under the GPLv3 (
 - **Memory**: VRAM, Z80 RAM, the 68000 dispatch table and 68000 RAM are put in the ESP32's internal RAM in this order (whatever does not fit goes to PSRAM, or stays in flash for the table). The ROM is in PSRAM.
 - **68000**: Musashi set up for the 68000 only, with the same results as Musashi. Each instruction finds its handler in a two-level table (about 21 KB, copied to internal RAM at start) instead of Musashi's 64K-entry table in flash, and the handler returns its clock count (no cycle table is read). The handlers run most often, chosen from a profile of many games, run from the ESP32's internal instruction RAM (IRAM): about 93% of the executed instructions. ROM and 68000 RAM are read and written without a function call. Short wait loops that only poll the VDP status or memory are fast-forwarded to the end of the current line slice, with the same result as running them.
 - **Z80**: z80core, written for this collection (the undocumented instructions and flags included). Its main loop runs from IRAM, the interrupt check runs only when something may have changed it, and the Z80 RAM is read and written without a function call.
-- **Interrupts**: the vertical interrupt is raised 788 master clocks into the first blanking line, so a line interrupt at the end of the last visible line is taken first (as on the real machine). A line interrupt that is pending while the game turns line interrupts off is taken when they are turned on again. The Z80's vertical interrupt stays asserted until the Z80 takes it.
-- **Build switches**: the speed-ups and the interrupt timings above can be switched back at the top of `md_m68k.h` (MD_M68K_*, MD_WAITSKIP) and `MegaDrive.ino` / `gwenesis_vdp.h` (MD_HINT_*, MD_VINT_DELAY). The defaults are recommended.
+- **Interrupts**: the vertical interrupt is raised 788 master clocks into the first blanking line, so a line interrupt at the end of the last visible line is taken first (as on the real machine). From the start of that line until the interrupt, the status register already shows the vertical interrupt flag. The line interrupt counter counts when each line is entered (so a handler reads the V counter of the line it is entering), and each line is drawn with the VDP state at the start of that line. A line interrupt that is pending while the game turns line interrupts off is taken when they are turned on again. The Z80's vertical interrupt stays asserted until the Z80 takes it.
+- **Build switches**: the speed-ups and the interrupt timings above can be switched back at the top of `md_m68k.h` (MD_M68K_*, MD_WAITSKIP) and `MegaDrive.ino` / `gwenesis_vdp.h` (MD_HINT_*, MD_CAPTURE_EARLY, MD_VINT_DELAY, MD_VINT_FLAG). The defaults are recommended.
 
 ## Known limitations
 
 - 3-button pad (no 6-button pad), player 1 only.
 - No cartridges with mappers or extra chips (SVP etc.), no switched backup RAM of ROMs over 2 MB, no EEPROM saves.
-- Interlace mode is not shown; shadow / highlight colours are shown as normal colours (as in Gwenesis on embedded targets).
+- The double-resolution interlace mode (448 lines) is shown as one field: every other line of the picture. Shadow / highlight colours are shown as normal colours (as in Gwenesis on embedded targets).
 - PAL (50 Hz) games run at the NTSC frame rate.
 - Speed: heavy scenes run slower than the real machine. Some games do not run correctly.
 
@@ -156,13 +156,13 @@ Gwenesis・FabGL と同じく、このスケッチ全体を GPLv3 で、ソー�
 - **メモリ**: VRAM・Z80 の RAM・68000 の命令の振り分け表・68000 の RAM を、この順に ESP32 の内部 RAM に置きます(入らないものは PSRAM。振り分け表はフラッシュのまま)。ROM は PSRAM です。
 - **68000**: Musashi を 68000 だけの設定にしています(結果は Musashi と同じ)。命令の処理は、フラッシュにある Musashi の 6 万 5 千項目の表ではなく、2 段の表(約 21KB。起動時に内部 RAM へ写す)で探します。命令の処理は自分のクロック数を返すので、クロック数の表も読みません。多くのゲームで数えて実行回数の多かった命令の処理は、ESP32 の内部の命令用 RAM(IRAM)で動かします(実行される命令の約 93%)。ROM と 68000 の RAM の読み書きは関数を呼ばずにその場でします。VDP の状態やメモリを読んで待つだけの短いループは、そのラインの区切りまで早送りします(結果は早送りしないときと同じ)。
 - **Z80**: このシリーズのために書いた z80core です(非公開の命令やフラグも扱います)。実行の本体は IRAM で動かし、割り込みの確認は変わりうるときだけにし、Z80 の RAM の読み書きは関数を呼ばずにその場でします。
-- **割り込み**: V 割り込みは帰線期間の最初のラインに入って 788 マスタークロック後に出すので、最後の表示ラインの H 割り込みが先に受け付けられます(実機と同じ順)。H 割り込みが受け付けられる前にゲームが H 割り込みを無効にした場合は、有効に戻したときに受け付けます。Z80 の V 割り込みは、Z80 が受け付けるまで出したままにします。
-- **ビルドスイッチ**: 上の高速化と割り込みのタイミングは、`md_m68k.h`(MD_M68K_…、MD_WAITSKIP)と `MegaDrive.ino` / `gwenesis_vdp.h`(MD_HINT_…、MD_VINT_DELAY)の先頭で前の作りに戻せます。既定のままをお勧めします。
+- **割り込み**: V 割り込みは帰線期間の最初のラインに入って 788 マスタークロック後に出すので、最後の表示ラインの H 割り込みが先に受け付けられます(実機と同じ順)。そのラインの始めから V 割り込みまでの間も、状態レジスタの V 割り込みの印は立っています。H 割り込みは各ラインに入るときに数え(処理の中で読む V カウンタは、入るラインの番号になります)、各ラインはそのラインの始めの VDP の状態で描きます。H 割り込みが受け付けられる前にゲームが H 割り込みを無効にした場合は、有効に戻したときに受け付けます。Z80 の V 割り込みは、Z80 が受け付けるまで出したままにします。
+- **ビルドスイッチ**: 上の高速化と割り込みのタイミングは、`md_m68k.h`(MD_M68K_…、MD_WAITSKIP)と `MegaDrive.ino` / `gwenesis_vdp.h`(MD_HINT_…、MD_CAPTURE_EARLY、MD_VINT_DELAY、MD_VINT_FLAG)の先頭で前の作りに戻せます。既定のままをお勧めします。
 
 ## できないこと
 
 - 3 ボタンのパッド(6 ボタンのパッドには対応していません)、1P だけです。
 - マッパーや追加のチップ(SVP など)のあるカートリッジ、2MB を超える ROM の切り替え式のバックアップ RAM、EEPROM のセーブには対応していません。
-- インターレースのモードは表示しません。シャドウ / ハイライトの色は普通の色で表示します(Gwenesis の組み込み用と同じ)。
+- 縦が倍の解像度のインターレースのモード(448 ライン)は、1 フィールド分(1 ラインおき)で表示します。シャドウ / ハイライトの色は普通の色で表示します(Gwenesis の組み込み用と同じ)。
 - PAL(50Hz)のソフトも NTSC のフレームの速さで動きます。
 - 速さ: 重い場面は実機より遅くなります。正しく動かないソフトもあります。

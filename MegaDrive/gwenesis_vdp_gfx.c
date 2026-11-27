@@ -920,7 +920,7 @@ static void spr_list_build(int table_size)
   for (int i = 0; (i < table_size) && sidx < table_size; ++i) {
     const uint8_t *cache = SAT_CACHE + sidx * 8;
     /* 2026-11-25 (GPLv3 section 5a) MegaDrive for TTGO VGA32: Y and X of a sprite are 9 bits (0-511; 10 bits only in
-       the interlace mode 2, which this renderer does not draw). They were read as 10 bits, so a sprite with the bit 9
+       the interlace mode 2, drawn by md_render_im2). They were read as 10 bits, so a sprite with the bit 9
        set was off the screen (Same! Same! Same! sets it: no sprites at all in the game) */
     spr_y0[n] = (int16_t)((((cache[0] & 0x1) << 8) | cache[1]) - 128);
     spr_sh[n] = (uint8_t)(BITS(cache[2], 0, 2) + 1);
@@ -1296,6 +1296,109 @@ void gwenesis_vdp_render_capture_slot(int line, int slot)
 #define gwenesis_vdp_regs md_cur->regs
 #define VSRAM md_cur->vsram
 
+/* 2026-11-27 (GPLv3 section 5a) MegaDrive for TTGO VGA32: the interlace mode 2 (register 12 bits 2-1 = 11: cells of
+   8 x 16 dots, 448 lines; Sonic the Hedgehog 2 uses it for the two-player screen) was not drawn at all (black screen).
+   It is drawn now as one field: screen line y shows line 2y of the 448-line picture (as a field of Genesis Plus GX:
+   the vertical scroll is halved, a cell covers 8 screen lines and its pattern rows are 2 * (y & 7); a sprite's Y has
+   10 bits and starts at 256). Simple and slow, in flash, used only in that mode (no sprite masking, no per-line
+   sprite limit status). The interlace mode 1 (bits 2-1 = 01) has the normal cells and is drawn as the normal mode
+   (it was not drawn either). */
+#define MD_IM2_ROW(name, r16) (*(const uint32_t *)(VRAM + (((name) & 0x03FF) << 6) + (((name) & 0x1000) ? 15 - (r16) : (r16)) * 4))
+
+static void im2_put8(uint8_t *scr, uint32_t p, uint16_t name, int kind)
+{
+  const uint8_t attrs = (uint8_t)(((name & 0x6000) >> 9) + ((name & 0x8000) >> 8) + (kind == 2 ? PIXATTR_SPRITE : 0));
+  if (p == 0) {
+    if (kind == 0) memset(scr, 0, 8);
+    return;
+  }
+  const uint8_t px[8] = { PIX0(p), PIX1(p), PIX2(p), PIX3(p), PIX4(p), PIX5(p), PIX6(p), PIX7(p) };
+  const int fl = (name & 0x0800) ? 7 : 0;
+  for (int i = 0; i < 8; i++) {
+    const uint8_t v = px[i ^ fl];
+    if (kind == 0) { scr[i] = v ? attrs | v : 0; continue; }
+    if (!v) continue;
+    if (kind == 1) {
+      if ((attrs & PIXATTR_HIPRI) || !(scr[i] & PIXATTR_HIPRI)) scr[i] = attrs | v;
+    } else if (attrs & PIXATTR_HIPRI) {
+      if (!(scr[i] & PIXATTR_SPRITE)) scr[i] = attrs | v;
+    } else if (!(scr[i] & PIXATTR_SPRITE_HIPRI)) {
+      scr[i] = attrs | v;
+    }
+  }
+}
+
+static void im2_plane(int line, unsigned int ntaddr, uint16_t hscroll, const uint16_t *vsram, int kind, int from, int to)
+{
+  uint8_t *const scr = &render_buffer[PIX_OVERFLOW];
+  const unsigned int column_scrolling = gwenesis_vdp_regs[11] & 0x4;
+  const uint16_t scrollx = (uint16_t)(from - hscroll);
+  unsigned int col = (scrollx >> 3) & ntw_mask;
+  uint8_t *pos = scr + from - (scrollx & 7);
+  uint8_t *const end = scr + to;
+  unsigned int numcell = 0;
+  while (pos < end) {
+    const unsigned int sy = ((vsram[0] & 0x7FF) >> 1) + line;
+    const unsigned int row = (sy >> 3) & nth_mask;
+    const uint16_t name = FETCH16VRAM(ntaddr + row * ntwidth_x2 + col * 2);
+    im2_put8(pos, MD_IM2_ROW(name, (sy & 7) << 1), name, kind);
+    col = (col + 1) & ntw_mask;
+    pos += 8;
+    if (column_scrolling && (++numcell & 1) == 0) vsram += 2;
+  }
+}
+
+static void md_render_im2(int line)
+{
+  uint8_t *const scr = &render_buffer[PIX_OVERFLOW];
+  im2_plane(line, REG4_NAMETABLE_B, md_cur->hscroll_b, &VSRAM[1], 0, 0, screen_width);
+  int a_first = PlanA_firstcol, a_last = PlanA_lastcol, w_first = Window_firstcol, w_last = Window_lastcol;
+  const int wline = REG18_WINDOW_VPOS * 8;
+  if ((gwenesis_vdp_regs[18] & 0x80) ? line >= wline : line < wline) {
+    a_first = a_last = 0;
+    w_first = 0;
+    w_last = screen_width;
+  }
+  if (a_first < a_last) im2_plane(line, REG2_NAMETABLE_A, md_cur->hscroll_a, &VSRAM[0], 1, a_first, a_last);
+  const int wd_x2 = (screen_width == 320 ? 128 : 64);
+  unsigned int nt = base_w + (line >> 3) * wd_x2 + w_first / 4;
+  for (int x = w_first; x < w_last; x += 8, nt += 2) {
+    const uint16_t name = FETCH16VRAM(nt);
+    im2_put8(scr + x, MD_IM2_ROW(name, (line & 7) << 1), name, 1);
+  }
+  const uint8_t *const start_table = VRAM + REG5_SAT_ADDRESS;
+  const int table_size = (screen_width == 320) ? 80 : 64;
+  const int max_sprites = (screen_width == 320) ? 20 : 16;
+  int sidx = 0, num_sprites = 0, num_pixels = 0;
+  for (int i = 0; i < table_size && sidx < table_size; ++i) {
+    const uint8_t *const cache = SAT_CACHE + sidx * 8;
+    const uint8_t *const table = start_table + sidx * 8;
+    const int sy = ((((cache[0] & 0x3) << 8) | cache[1]) - 256) >> 1;
+    const int sh = BITS(cache[2], 0, 2) + 1;
+    const int link = BITS(cache[3], 0, 7);
+    if (line >= sy && line < sy + sh * 8) {
+      const int sx = (((table[6] & 0x1) << 8) | table[7]) - 128;
+      const int sw = BITS(table[2], 2, 2) + 1;
+      uint16_t name = (table[4] << 8) | table[5];
+      int row = (line - sy) >> 3;
+      const int r16 = ((line - sy) & 7) << 1;
+      if (name & 0x1000) row = sh - row - 1;
+      if (sx > -sw * 8 && sx < screen_width) {
+        name += row;
+        int step = sh;
+        if (name & 0x0800) { name += sh * (sw - 1); step = -sh; }
+        for (int p = 0; p < sw; p++, name += step)
+          im2_put8(scr + sx + p * 8, MD_IM2_ROW(name, r16), name, 2);
+      }
+      num_pixels += sw * 8;
+      if (num_pixels >= screen_width && !md_sprite_nolimit) break;
+      if (++num_sprites >= max_sprites && !md_sprite_nolimit) break;
+    }
+    if (link == 0) break;
+    sidx = link;
+  }
+}
+
 static void md_render_line(int line);
 void gwenesis_vdp_render_line(int line) { md_cur = &md_ring[0]; md_render_line(line); }
 void gwenesis_vdp_render_slot(int slot) { md_cur = &md_ring[slot]; md_render_line(md_cur->line); }
@@ -1307,9 +1410,7 @@ static void md_render_line(int line)
       gwenesis_vdp_regs[17] != cfg_r17)
     md_cfg_regs(gwenesis_vdp_regs[3], gwenesis_vdp_regs[12], gwenesis_vdp_regs[16], gwenesis_vdp_regs[17]);
 
-  // interlace mode not implemented
-  if (BITS(gwenesis_vdp_regs[12], 1, 2) != 0)
-    return;
+  const int im2 = BITS(gwenesis_vdp_regs[12], 1, 2) == 3;
 
   if (line >= (REG1_PAL ? 240 : 224))
     return;
@@ -1336,13 +1437,17 @@ static void md_render_line(int line)
   if (MODE_SHI)
     memset(ps, 0, 320);
 
-  draw_line_b(line);
-  draw_line_aw(line);
+  if (im2) {
+    md_render_im2(line);
+  } else {
+    draw_line_b(line);
+    draw_line_aw(line);
 
-  if (MODE_SHI)
-    draw_sprites(line);
-  else
-    draw_sprites_over_planes(line);
+    if (MODE_SHI)
+      draw_sprites(line);
+    else
+      draw_sprites_over_planes(line);
+  }
 
   uint32_t *d = row + xofs / 4;
   const int n4 = screen_width / 4;
